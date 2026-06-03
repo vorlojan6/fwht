@@ -125,7 +125,7 @@ __device__ __forceinline__ void matrix_transpose_m8_n8_b16_inplace(b32& a0) {
 
 // Meta's Tensor Core Hadamard Transform Kernel (adapted)
 template<int num_chunks, int warps_per_block, int log_had_size, int blocks_per_sm, bool enable_mask, bool is_fp16>
-__global__ void __launch_bounds__(32 * warps_per_block, blocks_per_sm)
+__global__ void __launch_bounds__(32 * warps_per_block, (blocks_per_sm > 16 ? 16 : blocks_per_sm))
 // a is column major, b is row major
 hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
 

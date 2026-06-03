@@ -1621,6 +1621,34 @@ static fwht_gpu_mask_corr_workspace_t g_fwht_mask_corr_ws = {
     0
 };
 
+static void fwht_gpu_mask_corr_workspace_destroy(void) {
+    if (g_fwht_mask_corr_ws.d_points != NULL) {
+        cudaFree(g_fwht_mask_corr_ws.d_points);
+        g_fwht_mask_corr_ws.d_points = NULL;
+        g_fwht_mask_corr_ws.points_capacity_bytes = 0;
+    }
+    if (g_fwht_mask_corr_ws.d_masks != NULL) {
+        cudaFree(g_fwht_mask_corr_ws.d_masks);
+        g_fwht_mask_corr_ws.d_masks = NULL;
+        g_fwht_mask_corr_ws.masks_capacity_bytes = 0;
+    }
+    if (g_fwht_mask_corr_ws.d_oracle_bits != NULL) {
+        cudaFree(g_fwht_mask_corr_ws.d_oracle_bits);
+        g_fwht_mask_corr_ws.d_oracle_bits = NULL;
+        g_fwht_mask_corr_ws.oracle_capacity_bytes = 0;
+    }
+    if (g_fwht_mask_corr_ws.d_sums != NULL) {
+        cudaFree(g_fwht_mask_corr_ws.d_sums);
+        g_fwht_mask_corr_ws.d_sums = NULL;
+        g_fwht_mask_corr_ws.sums_capacity = 0;
+    }
+    if (g_fwht_mask_corr_ws.stream != NULL) {
+        cudaStreamDestroy(g_fwht_mask_corr_ws.stream);
+        g_fwht_mask_corr_ws.stream = NULL;
+    }
+    g_fwht_mask_corr_ws.ready = false;
+}
+
 static fwht_status_t fwht_gpu_mask_corr_workspace_init(void) {
     if (g_fwht_mask_corr_ws.ready) {
         return FWHT_SUCCESS;
@@ -1631,6 +1659,12 @@ static fwht_status_t fwht_gpu_mask_corr_workspace_init(void) {
     if (err != cudaSuccess) {
         g_fwht_mask_corr_ws.stream = NULL;
         return fwht_cuda_report(err, __FILE__, __LINE__);
+    }
+
+    if (atexit(fwht_gpu_mask_corr_workspace_destroy) != 0) {
+        cudaStreamDestroy(g_fwht_mask_corr_ws.stream);
+        g_fwht_mask_corr_ws.stream = NULL;
+        return FWHT_ERROR_OUT_OF_MEMORY;
     }
 
     g_fwht_mask_corr_ws.ready = true;

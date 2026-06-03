@@ -112,10 +112,6 @@ static void fwht_openmp_warmup_once(void) {
         (void)0;
     }
 }
-#else
-static void fwht_openmp_warmup_once(void) {
-    (void)0;
-}
 #endif
 
 static void fwht_print_simd_banner(void) {

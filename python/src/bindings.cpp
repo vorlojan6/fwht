@@ -1235,7 +1235,7 @@ with the entire LAT; otherwise None.)pbdoc");
              "Transform float64 array using context")
         .def("close", &PyFWHTContext::close,
              "Close context and release resources");
-    
+
     // Utility functions
     m.def("is_power_of_2", &py_fwht_is_power_of_2, py::arg("n"),
           "Check if n is a power of 2");
