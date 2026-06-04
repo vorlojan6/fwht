@@ -91,6 +91,9 @@ LIB_NAME = libfwht
 STATIC_LIB = $(LIB_DIR)/$(LIB_NAME).a
 SHARED_LIB = $(LIB_DIR)/$(LIB_NAME).so
 TEST_BIN = $(BUILD_DIR)/test_correctness
+SPECK32_TEST_BIN = $(BUILD_DIR)/test_speck32_exact
+SPECK32_LINEAR_BIN = $(BUILD_DIR)/speck32_linear
+SPECK32_DL_BIN = $(BUILD_DIR)/speck32_dl
 CLI_SRC = $(TOOLS_DIR)/fwht_cli.c
 CLI_BIN = $(BUILD_DIR)/fwht_cli
 TUNER_SRC = $(TOOLS_DIR)/backend_tuner.c
@@ -103,6 +106,11 @@ EXAMPLE3_SRC = $(EXAMPLES_DIR)/example_batch.c
 EXAMPLE3_BIN = $(EXAMPLES_DIR)/example_batch
 EXAMPLE4_SRC = $(EXAMPLES_DIR)/example_gpu_multi_precision.cu
 EXAMPLE4_BIN = $(EXAMPLES_DIR)/example_gpu_multi_precision
+SPECK32_CIPHER_DIR = ciphers/speck
+SPECK32_MODULE_SRC = $(SPECK32_CIPHER_DIR)/speck32_exact.c
+SPECK32_TEST_SRC = $(SPECK32_CIPHER_DIR)/test_speck32_exact.c
+SPECK32_LINEAR_SRC = $(TOOLS_DIR)/speck32_linear.c
+SPECK32_DL_SRC = $(TOOLS_DIR)/speck32_dl.c
 
 # Source files (CPU)
 SRCS = $(wildcard $(SRC_DIR)/*.c)
@@ -200,7 +208,7 @@ endif
 # Build Targets
 # ============================================================================
 
-.PHONY: all clean test install lib static shared directories bench cli tune-backend ffht-bench fftw-bench resync-lib platform-sanity FORCE
+.PHONY: all clean test install lib static shared directories bench cli tune-backend ffht-bench fftw-bench resync-lib platform-sanity test-speck32 speck32-linear speck32-dl FORCE
 
 ifeq ($(RUN_TESTS),1)
 all: directories lib test
@@ -417,6 +425,22 @@ endif
 	@echo "Running batch tests..."
 	@$(BUILD_DIR)/test_batch
 
+test-speck32: directories lib
+	@echo "Building Speck32 exact self-test..."
+	$(CC) $(CFLAGS) $(SPECK32_TEST_SRC) $(SPECK32_MODULE_SRC) -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) $(LDFLAGS) -lm -o $(SPECK32_TEST_BIN) -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+	@echo "Running Speck32 exact self-test..."
+	@$(SPECK32_TEST_BIN)
+
+speck32-linear: directories lib
+	@echo "Building Speck32 linear-analysis tool..."
+	$(CC) $(CFLAGS) $(SPECK32_LINEAR_SRC) $(SPECK32_MODULE_SRC) -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) $(LDFLAGS) -lm -o $(SPECK32_LINEAR_BIN) -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+	@echo "Run with: $(SPECK32_LINEAR_BIN) --help"
+
+speck32-dl: directories lib
+	@echo "Building Speck32 differential-linear tool..."
+	$(CC) $(CFLAGS) $(SPECK32_DL_SRC) $(SPECK32_MODULE_SRC) -L$(LIB_DIR) -lfwht $(CUDA_LDFLAGS) $(LDFLAGS) -lm -o $(SPECK32_DL_BIN) -Wl,-rpath,$(CURDIR)/$(LIB_DIR)
+	@echo "Run with: $(SPECK32_DL_BIN) --help"
+
 # Build and run GPU callback tests
 test-gpu-callbacks: directories lib
 	@echo "Building GPU callback test suite..."
@@ -516,6 +540,9 @@ help:
 	@echo "  static    - Build static library only"
 	@echo "  shared    - Build shared library only"
 	@echo "  test      - Build and run test suite"
+	@echo "  test-speck32 - Build and run the Speck32 exact self-test"
+	@echo "  speck32-linear - Build the Speck32 exact linear-analysis tool"
+	@echo "  speck32-dl - Build the Speck32 exact differential-linear tool"
 	@echo "  cli       - Build the fwht_cli command-line tool"
 	@echo "  sbox-bench - Generate random S-boxes and benchmark LAT"
 	@echo "  examples  - Build example programs under $(EXAMPLES_DIR)/"
