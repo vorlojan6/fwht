@@ -37,6 +37,31 @@ static uint16_t speck32_exact_rotr16(uint16_t value, unsigned int amount) {
     return (uint16_t)((value >> amount) | (value << (16u - amount)));
 }
 
+static unsigned int speck32_exact_lowest_set_bit_index(uint32_t value) {
+#if defined(__GNUC__) || defined(__clang__)
+    return (unsigned int)__builtin_ctz(value);
+#else
+    unsigned int index = 0u;
+
+    while ((value & 1u) == 0u) {
+        value >>= 1u;
+        ++index;
+    }
+    return index;
+#endif
+}
+
+static uint64_t speck32_exact_expand_zero_bit(uint64_t compressed_value,
+                                              unsigned int zero_bit_index) {
+    const uint64_t lower_mask = (zero_bit_index == 0u)
+        ? 0u
+        : ((UINT64_C(1) << zero_bit_index) - 1u);
+    const uint64_t lower = compressed_value & lower_mask;
+    const uint64_t upper = compressed_value & ~lower_mask;
+
+    return lower | (upper << 1u);
+}
+
 static void speck32_exact_encrypt_round(uint16_t round_key, uint16_t* x, uint16_t* y) {
     *x = speck32_exact_rotr16(*x, SPECK32_EXACT_ALPHA);
     *x = (uint16_t)(*x + *y);
@@ -409,7 +434,6 @@ fwht_status_t speck32_exact_fill_dl_output_histogram_from_input_difference(const
                                                                            double* histogram,
                                                                            size_t histogram_length) {
     fwht_status_t status;
-    uint64_t value;
     const uint64_t domain_length = (uint64_t)histogram_length;
 
     status = speck32_exact_validate_schedule(schedule);
@@ -430,24 +454,34 @@ fwht_status_t speck32_exact_fill_dl_output_histogram_from_input_difference(const
         return FWHT_SUCCESS;
     }
 
-    for (value = 0u; value < domain_length; ++value) {
-        const uint64_t paired = value ^ (uint64_t)input_difference;
-        uint32_t left;
-        uint32_t right;
-        uint32_t derivative;
+    {
+        const unsigned int split_bit = speck32_exact_lowest_set_bit_index(input_difference);
+        const long long pair_count = (long long)(domain_length >> 1u);
+        long long pair_index;
 
-        if (value > paired) {
-            continue;
+#ifdef _OPENMP
+        #pragma omp parallel for schedule(static) if (pair_count >= (long long)(1u << 20))
+#endif
+        for (pair_index = 0; pair_index < pair_count; ++pair_index) {
+            const uint64_t value = speck32_exact_expand_zero_bit((uint64_t)pair_index, split_bit);
+            const uint64_t paired = value ^ (uint64_t)input_difference;
+            uint32_t left;
+            uint32_t right;
+            uint32_t derivative;
+
+            left = (forward_codebook != NULL)
+                ? forward_codebook[(size_t)value]
+                : speck32_exact_encrypt_block(schedule, (uint32_t)value);
+            right = (forward_codebook != NULL)
+                ? forward_codebook[(size_t)paired]
+                : speck32_exact_encrypt_block(schedule, (uint32_t)paired);
+            derivative = left ^ right;
+
+#ifdef _OPENMP
+            #pragma omp atomic update
+#endif
+            histogram[(size_t)derivative] += 2.0;
         }
-
-        left = (forward_codebook != NULL)
-            ? forward_codebook[(size_t)value]
-            : speck32_exact_encrypt_block(schedule, (uint32_t)value);
-        right = (forward_codebook != NULL)
-            ? forward_codebook[(size_t)paired]
-            : speck32_exact_encrypt_block(schedule, (uint32_t)paired);
-        derivative = left ^ right;
-        histogram[(size_t)derivative] += 2.0;
     }
 
     return FWHT_SUCCESS;
@@ -459,7 +493,6 @@ fwht_status_t speck32_exact_fill_dl_input_histogram_from_output_difference(const
                                                                            double* histogram,
                                                                            size_t histogram_length) {
     fwht_status_t status;
-    uint64_t value;
     const uint64_t domain_length = (uint64_t)histogram_length;
 
     status = speck32_exact_validate_schedule(schedule);
@@ -480,24 +513,34 @@ fwht_status_t speck32_exact_fill_dl_input_histogram_from_output_difference(const
         return FWHT_SUCCESS;
     }
 
-    for (value = 0u; value < domain_length; ++value) {
-        const uint64_t paired = value ^ (uint64_t)output_difference;
-        uint32_t left;
-        uint32_t right;
-        uint32_t derivative;
+    {
+        const unsigned int split_bit = speck32_exact_lowest_set_bit_index(output_difference);
+        const long long pair_count = (long long)(domain_length >> 1u);
+        long long pair_index;
 
-        if (value > paired) {
-            continue;
+#ifdef _OPENMP
+        #pragma omp parallel for schedule(static) if (pair_count >= (long long)(1u << 20))
+#endif
+        for (pair_index = 0; pair_index < pair_count; ++pair_index) {
+            const uint64_t value = speck32_exact_expand_zero_bit((uint64_t)pair_index, split_bit);
+            const uint64_t paired = value ^ (uint64_t)output_difference;
+            uint32_t left;
+            uint32_t right;
+            uint32_t derivative;
+
+            left = (inverse_codebook != NULL)
+                ? inverse_codebook[(size_t)value]
+                : speck32_exact_decrypt_block(schedule, (uint32_t)value);
+            right = (inverse_codebook != NULL)
+                ? inverse_codebook[(size_t)paired]
+                : speck32_exact_decrypt_block(schedule, (uint32_t)paired);
+            derivative = left ^ right;
+
+#ifdef _OPENMP
+            #pragma omp atomic update
+#endif
+            histogram[(size_t)derivative] += 2.0;
         }
-
-        left = (inverse_codebook != NULL)
-            ? inverse_codebook[(size_t)value]
-            : speck32_exact_decrypt_block(schedule, (uint32_t)value);
-        right = (inverse_codebook != NULL)
-            ? inverse_codebook[(size_t)paired]
-            : speck32_exact_decrypt_block(schedule, (uint32_t)paired);
-        derivative = left ^ right;
-        histogram[(size_t)derivative] += 2.0;
     }
 
     return FWHT_SUCCESS;

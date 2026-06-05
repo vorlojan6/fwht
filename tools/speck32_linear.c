@@ -23,9 +23,14 @@ typedef enum {
 typedef struct {
     unsigned int rounds;
     uint64_t key;
+    uint64_t seed;
     uint32_t mask;
     size_t top_k;
+    size_t key_count;
     speck32_linear_mode_t mode;
+    bool key_is_set;
+    bool key_count_is_set;
+    bool seed_is_set;
     bool mode_is_set;
     bool use_codebook;
     bool force;
@@ -42,11 +47,14 @@ typedef struct {
 
 static void print_usage(const char* program) {
     fprintf(stderr,
-            "Usage: %s --rounds <n> --key <hex64> (--input-mask <hex32> | --output-mask <hex32>) [options]\n"
+            "Usage: %s --rounds <n> (--key <hex64> | --num-keys <n> [--seed <u64>]) "
+            "(--input-mask <hex32> | --output-mask <hex32>) [options]\n"
             "\n"
             "Options:\n"
             "  --rounds <n>          Number of Speck32 rounds (1-22).\n"
-            "  --key <hex64>        64-bit master key in hexadecimal, for example 0x1918111009080100.\n"
+            "  --key <hex64>        One 64-bit master key in hexadecimal, for example 0x1918111009080100.\n"
+            "  --num-keys <n>       Use n uniformly random 64-bit master keys and report RMS over keys.\n"
+            "  --seed <u64>         Seed for the random master-key generator in multi-key mode.\n"
             "  --input-mask <hex32> Fix one input mask and compute all output-mask correlations.\n"
             "  --output-mask <hex32> Fix one output mask and compute all input-mask correlations.\n"
             "  --top <n>            Print the strongest n masks by absolute correlation (default: 16).\n"
@@ -59,11 +67,14 @@ static void print_usage(const char* program) {
             "\n"
             "Notes:\n"
             "  Exact Speck32 linear analysis allocates a 2^32 double spectrum, about 32 GiB.\n"
+            "  Multi-key RMS mode needs one more 2^32 double accumulator, so about 64 GiB before any codebook.\n"
             "  Without --force the tool only reports the plan and exits safely.\n"
             "\n"
             "Examples:\n"
             "  %s --rounds 7 --key 0x1918111009080100 --input-mask 0x00000001 --dry-run\n"
+            "  %s --rounds 7 --num-keys 256 --seed 0x1234 --output-mask 0x00010000 --top 8 --dry-run\n"
             "  %s --rounds 7 --key 0x1918111009080100 --output-mask 0x00010000 --top 8 --force\n",
+            program,
             program,
             program,
             program);
@@ -127,6 +138,49 @@ static int parse_rounds(const char* text, unsigned int* out_rounds) {
     return 1;
 }
 
+static int read_os_random_u64(uint64_t* out_value) {
+    FILE* handle;
+    size_t read_count;
+
+    if (out_value == NULL) {
+        return 0;
+    }
+
+    handle = fopen("/dev/urandom", "rb");
+    if (handle == NULL) {
+        return 0;
+    }
+
+    read_count = fread(out_value, 1u, sizeof(*out_value), handle);
+    fclose(handle);
+    return read_count == sizeof(*out_value);
+}
+
+static uint64_t splitmix64_next(uint64_t* state) {
+    uint64_t z;
+
+    *state += UINT64_C(0x9e3779b97f4a7c15);
+    z = *state;
+    z = (z ^ (z >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)) * UINT64_C(0x94d049bb133111eb);
+    return z ^ (z >> 31);
+}
+
+static int prepare_random_key_seed(speck32_linear_options_t* options) {
+    if (options == NULL || !options->key_count_is_set) {
+        return 1;
+    }
+    if (options->seed_is_set) {
+        return 1;
+    }
+    if (!read_os_random_u64(&options->seed)) {
+        fprintf(stderr, "Error: unable to read a random seed from /dev/urandom.\n");
+        return 0;
+    }
+    options->seed_is_set = true;
+    return 1;
+}
+
 static uint64_t detect_physical_memory_bytes(void) {
 #if defined(__APPLE__)
     uint64_t memory_bytes = 0u;
@@ -165,16 +219,28 @@ static const char* mask_label(speck32_linear_mode_t mode) {
 
 static void print_plan(const speck32_linear_options_t* options,
                        size_t spectrum_bytes,
+                       size_t accumulator_bytes,
                        size_t codebook_bytes) {
     const uint64_t physical_memory_bytes = detect_physical_memory_bytes();
-    const uint64_t total_bytes = (uint64_t)spectrum_bytes + (uint64_t)codebook_bytes;
+    const uint64_t total_bytes = (uint64_t)spectrum_bytes + (uint64_t)accumulator_bytes + (uint64_t)codebook_bytes;
 
     printf("Speck32 exact linear analysis\n");
     printf("  mode: %s\n", mode_name(options->mode));
     printf("  rounds: %u\n", options->rounds);
-    printf("  key: 0x%016" PRIx64 "\n", options->key);
+    if (options->key_is_set) {
+        printf("  key: 0x%016" PRIx64 "\n", options->key);
+    } else {
+        printf("  master keys: %zu uniformly random keys\n", options->key_count);
+        printf("  seed: 0x%016" PRIx64 "\n", options->seed);
+        if (options->key_count > 1u) {
+            printf("  aggregation: RMS over keys\n");
+        }
+    }
     printf("  %s: 0x%08" PRIx32 "\n", mask_label(options->mode), options->mask);
     printf("  spectrum memory: %.2f GiB\n", bytes_to_gib((uint64_t)spectrum_bytes));
+    if (accumulator_bytes != 0u) {
+        printf("  sum-squared memory: %.2f GiB\n", bytes_to_gib((uint64_t)accumulator_bytes));
+    }
     if (options->use_codebook) {
         printf("  codebook memory: %.2f GiB\n", bytes_to_gib((uint64_t)codebook_bytes));
     } else {
@@ -265,6 +331,7 @@ static void print_top_results(const speck32_linear_options_t* options,
                               const double* spectrum,
                               size_t spectrum_length) {
     speck32_linear_top_entry_t* entries;
+    const bool use_rms = options->key_count_is_set && options->key_count > 1u;
     char signed_buffer[64];
     char abs_buffer[64];
     size_t index;
@@ -285,18 +352,29 @@ static void print_top_results(const speck32_linear_options_t* options,
         insert_top_entry(entries, options->top_k, (uint32_t)index, spectrum[index]);
     }
 
-    printf("Top %zu correlations by absolute value\n", options->top_k);
+    if (use_rms) {
+        printf("Top %zu RMS correlations by absolute value\n", options->top_k);
+    } else {
+        printf("Top %zu correlations by absolute value\n", options->top_k);
+    }
     for (index = 0u; index < options->top_k; ++index) {
         if (entries[index].score < 0.0) {
             break;
         }
-        format_signed_power_of_two(entries[index].correlation, signed_buffer, sizeof(signed_buffer));
         format_abs_power_of_two(entries[index].correlation, abs_buffer, sizeof(abs_buffer));
-        printf("  %2zu. mask=0x%08" PRIx32 " correlation=%s abs=%s\n",
-               index + 1u,
-               entries[index].mask,
-               signed_buffer,
-               abs_buffer);
+        if (use_rms) {
+            printf("  %2zu. mask=0x%08" PRIx32 " rms=%s\n",
+                   index + 1u,
+                   entries[index].mask,
+                   abs_buffer);
+        } else {
+            format_signed_power_of_two(entries[index].correlation, signed_buffer, sizeof(signed_buffer));
+            printf("  %2zu. mask=0x%08" PRIx32 " correlation=%s abs=%s\n",
+                   index + 1u,
+                   entries[index].mask,
+                   signed_buffer,
+                   abs_buffer);
+        }
     }
 
     free(entries);
@@ -327,6 +405,23 @@ static int parse_options(int argc, char** argv, speck32_linear_options_t* option
                 fprintf(stderr, "Error: --key expects a 64-bit hexadecimal value.\n");
                 return -1;
             }
+            options->key_is_set = true;
+            continue;
+        }
+        if (strcmp(arg, "--num-keys") == 0) {
+            if (++index >= argc || !parse_unsigned_size(argv[index], &options->key_count) || options->key_count == 0u) {
+                fprintf(stderr, "Error: --num-keys expects a positive integer.\n");
+                return -1;
+            }
+            options->key_count_is_set = true;
+            continue;
+        }
+        if (strcmp(arg, "--seed") == 0) {
+            if (++index >= argc || !parse_u64_hex(argv[index], &options->seed)) {
+                fprintf(stderr, "Error: --seed expects a 64-bit hexadecimal or decimal value.\n");
+                return -1;
+            }
+            options->seed_is_set = true;
             continue;
         }
         if (strcmp(arg, "--input-mask") == 0) {
@@ -379,6 +474,14 @@ static int parse_options(int argc, char** argv, speck32_linear_options_t* option
         return -1;
     }
 
+    if (options->key_is_set == options->key_count_is_set) {
+        fprintf(stderr, "Error: choose exactly one of --key or --num-keys.\n");
+        return -1;
+    }
+    if (options->seed_is_set && !options->key_count_is_set) {
+        fprintf(stderr, "Error: --seed is only valid together with --num-keys.\n");
+        return -1;
+    }
     if (!options->mode_is_set) {
         fprintf(stderr, "Error: choose exactly one of --input-mask or --output-mask.\n");
         return -1;
@@ -403,12 +506,18 @@ int main(int argc, char** argv) {
     fwht_status_t status;
     size_t spectrum_length;
     size_t spectrum_bytes;
+    size_t accumulator_bytes;
     size_t codebook_bytes;
+    size_t effective_key_count;
+    size_t key_index;
+    uint64_t random_state = 0u;
     uint64_t physical_memory_bytes;
     uint64_t total_bytes;
     double* spectrum = NULL;
+    double* sum_squared = NULL;
     uint32_t* codebook = NULL;
     int parse_status;
+    bool use_rms;
 
     parse_status = parse_options(argc, argv, &options);
     if (parse_status > 0) {
@@ -419,22 +528,25 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (!speck32_exact_init_key_le64(&schedule, options.key, options.rounds)) {
-        fprintf(stderr, "Error: unable to initialize the Speck32 key schedule.\n");
+    if (!prepare_random_key_seed(&options)) {
         return 1;
     }
 
+    use_rms = options.key_count_is_set && options.key_count > 1u;
+
     spectrum_length = speck32_exact_domain_size();
     spectrum_bytes = speck32_exact_required_spectrum_bytes();
+    accumulator_bytes = (options.key_count_is_set && options.key_count > 1u) ? spectrum_bytes : 0u;
     codebook_bytes = options.use_codebook ? speck32_exact_required_codebook_bytes() : 0u;
-    total_bytes = (uint64_t)spectrum_bytes + (uint64_t)codebook_bytes;
+    effective_key_count = options.key_count_is_set ? options.key_count : 1u;
+    total_bytes = (uint64_t)spectrum_bytes + (uint64_t)accumulator_bytes + (uint64_t)codebook_bytes;
     physical_memory_bytes = detect_physical_memory_bytes();
     if (spectrum_length == 0u || spectrum_bytes == 0u) {
         fprintf(stderr, "Error: exact Speck32 analysis is unavailable on this platform.\n");
         return 1;
     }
 
-    print_plan(&options, spectrum_bytes, codebook_bytes);
+    print_plan(&options, spectrum_bytes, accumulator_bytes, codebook_bytes);
     if (options.dry_run) {
         return 0;
     }
@@ -461,6 +573,18 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (options.key_count_is_set && options.key_count > 1u) {
+        sum_squared = (double*)calloc(spectrum_length, sizeof(*sum_squared));
+        if (sum_squared == NULL) {
+            fprintf(stderr,
+                    "Error: unable to allocate the RMS accumulator buffer (%.2f GiB, %s).\n",
+                    bytes_to_gib((uint64_t)accumulator_bytes),
+                    strerror(errno));
+            free(spectrum);
+            return 1;
+        }
+    }
+
     if (options.use_codebook) {
         codebook = (uint32_t*)malloc(codebook_bytes);
         if (codebook == NULL) {
@@ -468,48 +592,78 @@ int main(int argc, char** argv) {
                     "Error: unable to allocate the codebook buffer (%.2f GiB, %s).\n",
                     bytes_to_gib((uint64_t)codebook_bytes),
                     strerror(errno));
+            free(sum_squared);
             free(spectrum);
             return 1;
+        }
+    }
+
+    if (options.key_count_is_set) {
+        random_state = options.seed;
+    }
+
+    for (key_index = 0u; key_index < effective_key_count; ++key_index) {
+        const uint64_t master_key = options.key_is_set ? options.key : splitmix64_next(&random_state);
+
+        if (!speck32_exact_init_key_le64(&schedule, master_key, options.rounds)) {
+            fprintf(stderr, "Error: unable to initialize the Speck32 key schedule.\n");
+            free(codebook);
+            free(sum_squared);
+            free(spectrum);
+            return 1;
+        }
+
+        if (options.use_codebook) {
+            if (options.mode == SPECK32_LINEAR_FIXED_INPUT_MASK) {
+                status = speck32_exact_build_inverse_codebook(&schedule, codebook, spectrum_length);
+            } else {
+                status = speck32_exact_build_forward_codebook(&schedule, codebook, spectrum_length);
+            }
+            if (status != FWHT_SUCCESS) {
+                fprintf(stderr, "Error: codebook construction failed: %s.\n", fwht_error_string(status));
+                free(codebook);
+                free(sum_squared);
+                free(spectrum);
+                return 1;
+            }
         }
 
         if (options.mode == SPECK32_LINEAR_FIXED_INPUT_MASK) {
-            status = speck32_exact_build_inverse_codebook(&schedule, codebook, spectrum_length);
+            status = speck32_exact_linear_output_spectrum_from_input_mask(&schedule,
+                                                                          options.mask,
+                                                                          codebook,
+                                                                          NULL,
+                                                                          spectrum,
+                                                                          spectrum_length);
         } else {
-            status = speck32_exact_build_forward_codebook(&schedule, codebook, spectrum_length);
+            status = speck32_exact_linear_input_spectrum_from_output_mask(&schedule,
+                                                                          options.mask,
+                                                                          codebook,
+                                                                          NULL,
+                                                                          spectrum,
+                                                                          spectrum_length);
         }
         if (status != FWHT_SUCCESS) {
-            fprintf(stderr, "Error: codebook construction failed: %s.\n", fwht_error_string(status));
+            fprintf(stderr, "Error: linear analysis failed: %s.\n", fwht_error_string(status));
             free(codebook);
+            free(sum_squared);
             free(spectrum);
             return 1;
         }
+
+        if (options.key_count_is_set && options.key_count > 1u) {
+            speck32_exact_accumulate_squared_values(sum_squared, spectrum, spectrum_length);
+        }
     }
 
-    if (options.mode == SPECK32_LINEAR_FIXED_INPUT_MASK) {
-        status = speck32_exact_linear_output_spectrum_from_input_mask(&schedule,
-                                                                      options.mask,
-                                                                      codebook,
-                                                                      NULL,
-                                                                      spectrum,
-                                                                      spectrum_length);
-    } else {
-        status = speck32_exact_linear_input_spectrum_from_output_mask(&schedule,
-                                                                      options.mask,
-                                                                      codebook,
-                                                                      NULL,
-                                                                      spectrum,
-                                                                      spectrum_length);
-    }
-    if (status != FWHT_SUCCESS) {
-        fprintf(stderr, "Error: linear analysis failed: %s.\n", fwht_error_string(status));
-        free(codebook);
-        free(spectrum);
-        return 1;
+    if (use_rms) {
+        speck32_exact_finish_rms(spectrum, sum_squared, spectrum_length, effective_key_count);
     }
 
     print_top_results(&options, spectrum, spectrum_length);
 
     free(codebook);
+    free(sum_squared);
     free(spectrum);
     return 0;
 }

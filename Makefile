@@ -29,9 +29,20 @@ DESTDIR ?=
 CC = gcc
 CXX = g++
 NVCC = nvcc
-BASE_CFLAGS = -std=c99 -O3 -Wall -Wextra -pedantic -pthread -I$(INCLUDE_DIR) -Wno-pass-failed
+CC_VERSION_TEXT := $(shell $(CC) --version 2>/dev/null | head -n 1)
+CXX_VERSION_TEXT := $(shell $(CXX) --version 2>/dev/null | head -n 1)
+
+ifneq ($(findstring clang,$(CC_VERSION_TEXT)),)
+CC_NO_PASS_FAILED_FLAG = -Wno-pass-failed
+endif
+
+ifneq ($(findstring clang,$(CXX_VERSION_TEXT)),)
+CXX_NO_PASS_FAILED_FLAG = -Wno-pass-failed
+endif
+
+BASE_CFLAGS = -std=c99 -O3 -Wall -Wextra -pedantic -pthread -I$(INCLUDE_DIR) $(CC_NO_PASS_FAILED_FLAG)
 CFLAGS = $(BASE_CFLAGS)
-BASE_CXXFLAGS = -O3 -Wall -Wextra -pedantic -pthread -I$(INCLUDE_DIR) -Wno-pass-failed
+BASE_CXXFLAGS = -O3 -Wall -Wextra -pedantic -pthread -I$(INCLUDE_DIR) $(CXX_NO_PASS_FAILED_FLAG)
 CXXFLAGS = $(BASE_CXXFLAGS)
 ifeq ($(NO_SIMD),1)
 	CFLAGS +=
